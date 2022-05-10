@@ -147,5 +147,6 @@ function reward_risky(K_safe, K_risky, a, z_i, par::Pars)
     return (u_ind(c; par).+β.*(V_low_w.+V_high_w))[1]
 end
 
-function solve_model()
+function hello_Irene()
+    println("Hello Irene")
 end
