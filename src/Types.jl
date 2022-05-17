@@ -5,7 +5,8 @@
     R = 1 + r # Gross Interest Rate on Capital
     P_h = 1 # House price, normalized
     P_b = 1 / R # Bond price
-    P_l = (R - 1) + 0.02 # Rental Rate for Housing, plus premium
+    premium = 0.3
+    P_l = (R - 1) + premium # Rental Rate for Housing, plus premium
     σ = 3.911 # CRRA coefficient
     θ = 0.8590 # Consumption Share, taken from Jensen Krueger Mitman
     w = 1.0 # wage rate
@@ -16,12 +17,15 @@
     k = 0.7304
     σ_δ = 0.0077 #standard distribution
     N = 8 # Number of nodes
-    dist = truncated(GeneralizedExtremeValue(δ_min, σ_δ, k), δ_min, δ_max)
-
+    
+    #! This is a different formulation that distributes weight more equally
+    #dist = truncated(GeneralizedExtremeValue(δ_min, σ_δ, k), δ_min, δ_max)
+    
+    dist = GeneralizedExtremeValue(δ_min, σ_δ, k)
     q0 = 0.001
-    qN = 0.99999
-    δs = qnwdist(dist, N, q0, qN)[1]
-    w_δ = qnwdist(dist, N, q0, qN)[2]
+    qN = cdf(dist, 1)
+    δs   = qnwdist(dist, N, q0, qN)[1]
+    w_δ  = qnwdist(dist, N, q0, qN)[2]
     w_δt = qnwdist(dist, N, q0, qN)[2]'
 
     #! States of wealth
@@ -43,8 +47,4 @@
 
     #! Housing is bought at the beginning or end of the period
     housing_beginning = :yes
-
-    #! Some parameters for testing what is going on with risky capital
-    Rs = [0.0, 2 * R + 0.05] #risky capital pays a premium
-    w_Rt = [0.5; 0.5]
 end
