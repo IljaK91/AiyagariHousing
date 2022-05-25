@@ -186,7 +186,7 @@ function delta_low(a_next, K, h, step, par::Pars)
     if iszero(h)
         -Inf
     else
-        1 - (a_next + step / 2 - par.R * K) / h #Irene: you do not have P_{t+1}^h (ie P_h) on the denominator? Or is it because you already assume that the price housing P_h is 1.0?
+        1 - (a_next + step / 2 - par.R * K) / (par.P_h * h) 
     end
 end
 
@@ -206,7 +206,7 @@ function delta_high(a_next, K, h, step, par::Pars)
     if iszero(h)
         -Inf
     else
-        1 - (a_next - step / 2 - par.R * K) / h
+        1 - (a_next - step / 2 - par.R * K) / (par.P_h*h)
     end
 end
 
@@ -225,6 +225,7 @@ function Prob_a_next(K, h, a_i_next, par::Pars)
     @unpack_Pars par
     step_up, step_down = calc_step(a_i_next, par)
     a_next = par.nodes_a[a_i_next]
+    # If there is basically no housing investment, the transition matrix is not stochastic.
     if h < 1e-6
         if a_i_next == 1
             if R * K <= a_next + step_up / 2
@@ -245,7 +246,7 @@ function Prob_a_next(K, h, a_i_next, par::Pars)
                 return 0.0
             end
         end
-
+    # If instead we have housing investment
     elseif h > 1e-6
         δ_low = delta_low(a_next, K, h, step_up, par)
         δ_high = delta_high(a_next, K, h, step_down, par)
@@ -403,16 +404,16 @@ Performs value function iteration, solving for the optimal policy functions for 
 - `maxit`: Maximum number of iterations. Default value 500.
 """
 
-function solve_model(par; tol=1e-8, maxit=500)
+function solve_model(par; tol=1e-8, maxit=500, verbose::Bool=true)
     i = 1
     diff = 1000
-    V_a_guess = zeros(length(par.nodes_a), length(par.z_chain.state_values))
     V_a_sol = zeros(length(par.nodes_a), length(par.z_chain.state_values))
     sol_K = zeros(length(par.nodes_a), length(par.z_chain.state_values))
     sol_h = zeros(length(par.nodes_a), length(par.z_chain.state_values))
     sol_c = zeros(length(par.nodes_a), length(par.z_chain.state_values))
     sol_y = zeros(length(par.nodes_a), length(par.z_chain.state_values))
-
+    #! Our initial guess for the value function derives from the initial guess of c_low and c_high.
+    V_a_guess = [funeval(par.c_low, par.basis, par.nodes_a)[1][:] funeval(par.c_high, par.basis, par.nodes_a)[1][:]]
     while diff > tol && i < maxit
         for z_i in eachindex(par.z_chain.state_values)
             for a_i in eachindex(par.nodes_a)
@@ -424,7 +425,7 @@ function solve_model(par; tol=1e-8, maxit=500)
                 #set_optimizer_attribute(model, "algorithm", :LD_MMA)
                 model = Model(Ipopt.Optimizer)
                 set_silent(model)
-                @variable(model, a + par.w * z >= h >= 0)
+                @variable(model, (a + par.w * z)/par.P_h >= h >= 0)
                 @variable(model, a + par.w * z >= K >= 0)
 
                 f(h, K) = myfunc2(h, K, a, z_i, par)
@@ -459,7 +460,10 @@ function solve_model(par; tol=1e-8, maxit=500)
             end
         end
         diff = copy(sum((V_a_guess .- V_a_sol) .^ 2))
-        @printf "Iteration: %i. Residual: %.3e\n" i diff
+
+        if verbose == true
+            @printf "Iteration: %i. Residual: %.3e\n" i diff
+        end
         if diff < tol
             break
         else
@@ -519,7 +523,7 @@ Takes the keyword argument fixed_supply, where true means that total housing sup
 - `par`: Struct of Parameters.
 - `fixed_supply`: true means that total housing supply is fixed to one. false for elastic housing supply.
 """
-function marketclearing_housing(sol_K, sol_h, par::Pars; fixed_supply::Bool=false)
+function marketclearing_housing(sol_K, sol_h, sol_c, par::Pars; fixed_supply::Bool=false)
 
     distr = stst_distr(sol_K, sol_h, par)
     # Reshape parameters
@@ -534,7 +538,15 @@ function marketclearing_housing(sol_K, sol_h, par::Pars; fixed_supply::Bool=fals
     if fixed_supply
         1 - total_housing_demand, 1 - total_housing_ownership
     else
-        total_housing_ownership - total_housing_demand, 0.0
+        total_housing_ownership - total_housing_demand
     end
+end
 
+function find_rental_rate(par::Pars)
+    f(x) = begin
+        @set! par.P_l = x^2
+        V_a_sol, sol_K, sol_h, sol_c, sol_y, par = solve_model(par, verbose = false)
+        return marketclearing_housing(sol_K, sol_h, sol_c, par)
+    end
+    find_zero(f, √par.P_l, verbose = true)^2
 end
