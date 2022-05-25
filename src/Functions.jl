@@ -186,7 +186,7 @@ function delta_low(a_next, K, h, step, par::Pars)
     if iszero(h)
         -Inf
     else
-        1 - (a_next + step / 2 - par.R * K) / (par.P_h * h) 
+        1 - (a_next + step / 2 - par.R * K) / (par.P_h * h)
     end
 end
 
@@ -206,7 +206,7 @@ function delta_high(a_next, K, h, step, par::Pars)
     if iszero(h)
         -Inf
     else
-        1 - (a_next - step / 2 - par.R * K) / (par.P_h*h)
+        1 - (a_next - step / 2 - par.R * K) / (par.P_h * h)
     end
 end
 
@@ -246,7 +246,7 @@ function Prob_a_next(K, h, a_i_next, par::Pars)
                 return 0.0
             end
         end
-    # If instead we have housing investment
+        # If instead we have housing investment
     elseif h > 1e-6
         δ_low = delta_low(a_next, K, h, step_up, par)
         δ_high = delta_high(a_next, K, h, step_down, par)
@@ -425,7 +425,7 @@ function solve_model(par; tol=1e-8, maxit=500, verbose::Bool=true)
                 #set_optimizer_attribute(model, "algorithm", :LD_MMA)
                 model = Model(Ipopt.Optimizer)
                 set_silent(model)
-                @variable(model, (a + par.w * z)/par.P_h >= h >= 0)
+                @variable(model, (a + par.w * z) / par.P_h >= h >= 0)
                 @variable(model, a + par.w * z >= K >= 0)
 
                 f(h, K) = myfunc2(h, K, a, z_i, par)
@@ -448,6 +448,9 @@ function solve_model(par; tol=1e-8, maxit=500, verbose::Bool=true)
                     @show termination_status(model)
                     error("No solution was found!")
                 end
+
+                #! Write here a second part where problem is solved using h=0
+
                 V_a_sol[a_i, z_i] = objective_value(model)
                 sol_h[a_i, z_i] = value(h)
                 sol_K[a_i, z_i] = value(K)
@@ -535,18 +538,72 @@ function marketclearing_housing(sol_K, sol_h, sol_c, par::Pars; fixed_supply::Bo
     total_housing_demand = sum((1 - par.θ) .* sol_c_long ./ par.P_l .* distr)
 
     #! Give one or two residuals depending on whether the supply of housing is fixed to one or not.
-    if fixed_supply
+    if fixed_supply == true
+        #@show total_housing_demand
+        #@show total_housing_ownership
         1 - total_housing_demand, 1 - total_housing_ownership
     else
         total_housing_ownership - total_housing_demand
     end
 end
 
+"""
+    find_rental_rate(par::Pars)
+
+Assuming an elastic supply of housing, solve for the equilibrium rental rate.
+"""
 function find_rental_rate(par::Pars)
     f(x) = begin
         @set! par.P_l = x^2
-        V_a_sol, sol_K, sol_h, sol_c, sol_y, par = solve_model(par, verbose = false)
+        V_a_sol, sol_K, sol_h, sol_c, sol_y, par = solve_model(par, verbose=false)
         return marketclearing_housing(sol_K, sol_h, sol_c, par)
     end
-    find_zero(f, √par.P_l, verbose = true)^2
+    find_zero(f, √par.P_l, verbose=true)^2
+end
+
+"""
+    residuals_GE(x, res; par::Pars)
+
+Taken a guess for P_l and P_h, finds the equilibrium policy functions and computes the excess demand for housing.
+
+# Arguments:
+- `x`: Guess for P_l and P_h.
+- `res`: Pre-allocated vector for residuals.
+- `par`: Struct for parameters.
+"""
+function residuals_GE(x, res; par::Pars)
+    P_l = x[1]^2
+    P_h = x[2]^2
+    #@show P_l P_h
+    #@show par.P_l par.P_h
+    par.P_l = P_l
+    par.P_h = P_h
+
+    V_a_sol, sol_K, sol_h, sol_c, sol_y, par_sol = solve_model(par, verbose=false, tol = 1e-6)
+
+    res .= marketclearing_housing(sol_K, sol_h, sol_c, par; fixed_supply=true)
+
+    # Save solution to par
+    par.c_low = par_sol.c_low
+    par.c_high = par_sol.c_high
+    # Lets see whether it carries over...
+    #@show res
+    return res # Try to force the algorithm to come up with something more precise
+end
+
+"""
+    solve_GE(par::Pars)
+
+Given a good initial guess, this function solves for the equilibrium price of housing P_h and rental rate P_l. Note that it returns the whole results from the optimization sol and the solution needs to be accessed via sol.zero.^2 where the first entry is for P_l and the second is for P_h.
+"""
+function solve_GE(par::Pars)
+    res = zeros(2)
+    f!(x) = residuals_GE(x, res; par)
+
+    initial_x = [√par.P_l, √par.P_h]
+
+    #res = optimize(f, initial_x, Optim.Options(g_tol = 1e-14))
+    sol = nlsolve(f!, initial_x, ftol=1e-6, xtol = 1e-6, show_trace = true)
+
+    return sol
 end
