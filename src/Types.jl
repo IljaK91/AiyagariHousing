@@ -15,6 +15,9 @@
     θ = 0.8590 # Consumption Share, taken from Jensen Krueger Mitman
     w = 1.0 # wage rate
 
+    #! Minimum buying requirement
+    h_bar = 1.0
+    
     #! Depreciation shocks
     δ_min = -0.0082 #minimum value of depreciation shock for housing
     δ_max = 1.0
