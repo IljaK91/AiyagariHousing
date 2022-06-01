@@ -14,7 +14,11 @@ u(c, h; par) = (c^par.θ * h^(1 - par.θ))^(1 - par.σ) / (1 - par.σ)
     where c = c_tilde + P_l*h is equal to total expenditure.
 """
 function u_ind(c; par)
-    (Psi(par) * c^(1 - par.σ) - 1) / (1 - par.σ)
+    if c > 0
+        (Psi(par) * c^(1 - par.σ) - 1) / (1 - par.σ)
+    else
+        -Inf
+    end
 end
 
 """
@@ -404,7 +408,7 @@ Performs value function iteration, solving for the optimal policy functions for 
 - `maxit`: Maximum number of iterations. Default value 500.
 """
 
-function solve_model(par; tol=1e-8, maxit=500, verbose::Bool=true)
+function solve_model_old(par; tol=1e-8, maxit=500, verbose::Bool=true)
     i = 1
     diff = 1000
     V_a_sol = zeros(length(par.nodes_a), length(par.z_chain.state_values))
@@ -477,6 +481,122 @@ function solve_model(par; tol=1e-8, maxit=500, verbose::Bool=true)
         end
     end
     return V_a_sol, sol_K, sol_h, sol_c, sol_y, par
+end
+
+function solve_model(par; tol=1e-8, maxit=500, verbose::Bool=true)
+    i = 1
+    diff = 1000
+    V_a_sol = zeros(length(par.nodes_a), length(par.z_chain.state_values))
+    sol_K = zeros(length(par.nodes_a), length(par.z_chain.state_values))
+    sol_h = zeros(length(par.nodes_a), length(par.z_chain.state_values))
+    sol_c = zeros(length(par.nodes_a), length(par.z_chain.state_values))
+    sol_y = zeros(length(par.nodes_a), length(par.z_chain.state_values))
+    #! Our initial guess for the value function derives from the initial guess of c_low and c_high.
+    V_a_guess = [funeval(par.c_low, par.basis, par.nodes_a)[1][:] funeval(par.c_high, par.basis, par.nodes_a)[1][:]]
+    while diff > tol && i < maxit
+        for z_i in eachindex(par.z_chain.state_values)
+            for a_i in eachindex(par.nodes_a)
+            
+                a = par.nodes_a[a_i]
+                z = par.z_chain.state_values[z_i]
+            
+                #model = Model(NLopt.Optimizer)
+                #set_optimizer_attribute(model, "algorithm", :LD_MMA)
+                val_sol, h_sol, K_sol = find_solution(a, z, z_i, par, i, sol_h[a_i, z_i], sol_K[a_i, z_i])
+            
+                V_a_sol[a_i, z_i] = val_sol
+                sol_h[a_i, z_i] = h_sol
+                sol_K[a_i, z_i] = K_sol
+                sol_y[a_i, z_i] = a + par.w * z
+                if par.housing_beginning == :yes
+                    sol_c[a_i, z_i] = a + par.w * z - (par.P_h - par.P_l) * sol_h[a_i, z_i] - sol_K[a_i, z_i]
+                elseif par.housing_beginning == :no
+                    sol_c[a_i, z_i] = a + par.w * z - par.P_h * sol_h[a_i, z_i] - sol_K[a_i, z_i]
+                end
+            end
+        end
+        diff = copy(sum((V_a_guess .- V_a_sol) .^ 2))
+
+        if verbose == true
+            @printf "Iteration: %i. Residual: %.3e\n" i diff
+        end
+        if diff < tol
+            break
+        else
+            @set! par.c_low = par.phi \ V_a_sol[:, 1]
+            @set! par.c_high = par.phi \ V_a_sol[:, 2]
+            V_a_guess = copy(V_a_sol)
+            i += 1
+        end
+    end
+    return V_a_sol, sol_K, sol_h, sol_c, sol_y, par
+end
+
+function find_solution(a, z, z_i, par::Pars, i, last_h, last_K)
+    val_h, h, K = solve_problem(a, z, z_i, par, housing=true, i=i, last_h=last_h, last_K=last_K)
+
+    if iszero(par.h_bar)
+        val_h_zero = -Inf
+    elseif par.h_bar > 0
+        val_h_zero, h_zero, K_zero = solve_problem(a, z, z_i, par, housing=false, i=i, last_h=last_h, last_K=last_K)
+    end
+
+    if val_h > val_h_zero
+        return val_h, h, K
+    elseif val_h <= val_h_zero
+        return val_h_zero, h_zero, K_zero
+    end
+end
+function solve_problem(a, z, z_i, par::Pars; housing::Bool = true, i::Int, last_h, last_K)
+    model = Model(Ipopt.Optimizer)
+    set_silent(model)
+    if housing == true
+        #! Need to check whether there are enough resources, otherwise give degenerate solution
+        if (a + par.w * z) / par.P_h <= par.h_bar
+            return -Inf, 0.0, 0.0
+        end
+        @variable(model, (a + par.w * z) / par.P_h >= h >= par.h_bar)
+    elseif housing == false
+        @variable(model, 0 >= h >= 0)
+    end
+    @variable(model, a + par.w * z >= K >= 0)
+
+    f(h, K) = myfunc2(h, K, a, z_i, par)
+    register(model, :f, 2, f, autodiff=true)
+
+    @NLobjective(model, Max, f(h, K))
+    if par.housing_beginning == :yes
+        @NLconstraint(model, (par.P_h - par.P_l) * h + K - a - par.w * z <= 0)
+    elseif par.housing_beginning == :no
+        @NLconstraint(model, par.P_h * h + K - a - par.w * z <= 0)
+    end
+
+    if i > 1
+        if iszero(last_h) && housing == true    
+            #! Need to make sure that the initial guess is actually valid!
+            set_start_value(h, (par.h_bar + a / par.P_h)/2)
+            set_start_value(K, 0.0)
+        else
+            set_start_value(h, last_h)
+            set_start_value(K, last_K)
+        end
+    end
+
+    JuMP.optimize!(model)
+    if termination_status(model) != OPTIMAL && termination_status(model) != LOCALLY_SOLVED && termination_status(model) != ALMOST_LOCALLY_SOLVED
+        @show termination_status(model)
+        @show a
+        @show par.h_bar
+        @show housing
+        @show last_h, last_K
+        error("No solution was found!")
+    end
+
+    if housing == true
+        return objective_value(model), value(h), value(K)
+    elseif housing == false
+        return objective_value(model), 0.0, value(K)
+    end
 end
 
 """
@@ -574,8 +694,7 @@ Taken a guess for P_l and P_h, finds the equilibrium policy functions and comput
 function residuals_GE(x, res; par::Pars)
     P_l = x[1]^2
     P_h = x[2]^2
-    #@show P_l P_h
-    #@show par.P_l par.P_h
+
     par.P_l = P_l
     par.P_h = P_h
 
@@ -586,9 +705,8 @@ function residuals_GE(x, res; par::Pars)
     # Save solution to par
     par.c_low = par_sol.c_low
     par.c_high = par_sol.c_high
-    # Lets see whether it carries over...
-    #@show res
-    return res # Try to force the algorithm to come up with something more precise
+
+    return res 
 end
 
 """
@@ -596,14 +714,50 @@ end
 
 Given a good initial guess, this function solves for the equilibrium price of housing P_h and rental rate P_l. Note that it returns the whole results from the optimization sol and the solution needs to be accessed via sol.zero.^2 where the first entry is for P_l and the second is for P_h.
 """
-function solve_GE(par::Pars)
+function solve_GE(par::Pars; tol = 1e-5, verbose::Bool = true)
     res = zeros(2)
     f!(x) = residuals_GE(x, res; par)
 
     initial_x = [√par.P_l, √par.P_h]
 
     #res = optimize(f, initial_x, Optim.Options(g_tol = 1e-14))
-    sol = nlsolve(f!, initial_x, ftol=1e-6, xtol = 1e-6, show_trace = true)
+    sol = nlsolve(f!, initial_x, ftol=tol, xtol = tol, show_trace = verbose)
 
     return sol
+end
+
+function comp_statics(h_bar_range, par::Pars)
+    sol_P_l = zeros(length(h_bar_range))
+    sol_P_h = zeros(length(h_bar_range))
+    sol_V_a = Any[]
+    sol_K = Any[]
+    sol_h = Any[]
+    sol_c = Any[]
+    sol_y = Any[]
+    pars = Any[]
+    #solve_model(par; tol=1e-6, verbose=false) #run one time outside the loop
+    for i in eachindex(h_bar_range)
+        next_h_bar = h_bar_range[i]
+        println("Element $i: $next_h_bar.")
+        par.h_bar = next_h_bar
+        sol = solve_GE(par, verbose=true)
+        sol_P_l[i] = par.P_l = sol.zero[1]^2
+        sol_P_h[i] = par.P_h = sol.zero[2]^2
+    
+        V, K, h, c, y, par = solve_model(par, tol=1e-5, verbose=false)
+        push!(sol_V_a, V)
+        push!(sol_K, K)
+        push!(sol_h, h)
+        push!(sol_c, c)
+        push!(sol_y, y)
+        push!(pars, par)
+    end
+    return sol_P_l, sol_P_h, sol_V_a, sol_K, sol_h, sol_c, sol_y, pars
+end
+
+function risk_premium(par::Pars)
+    Rs = ((1 .- par.δs) .* par.P_h .+ par.P_l) ./ par.P_h
+    R_h = sum(par.w_δ .* Rs)
+
+    return R_h - par.R
 end
